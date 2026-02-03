@@ -1,28 +1,25 @@
 /**
- * GMAIL EXPORTER: STRICT INBOX ONLY
+ * GMAIL TO DRIVE: THE COMPLETE HIERARCHY EXPORTER
  */
-function exportInboxOnly() {
+function exportFullGmailHierarchy() {
   const lock = LockService.getScriptLock();
   try { lock.waitLock(1000); } catch (e) { return; }
 
   const startTime = new Date().getTime();
   const scriptProperties = PropertiesService.getScriptProperties();
-  const rootFolderId = scriptProperties.getProperty('backupFolderId');
-  const rootFolder = DriveApp.getFolderById(rootFolderId);
+  const MY_EMAIL = Session.getActiveUser().getEmail(); 
 
-  // 1. EXIT IF FINISHED
-  if (scriptProperties.getProperty('isExportFinished') === 'true') {
-    console.log("Inbox export is already marked as finished.");
-    return;
-  }
+  if (scriptProperties.getProperty('isExportFinished') === 'true') return;
 
   const batchSize = 50; 
-  const searchQuery = "is:inbox"; // Targets only messages in the Inbox
+  const searchQuery = "-is:trash"; 
   
   let start = parseInt(scriptProperties.getProperty('skipCount')) || 0;
   scriptProperties.setProperty('skipCount', (start + batchSize).toString());
 
-  // Helper for folder creation
+  let rootFolderId = scriptProperties.getProperty('backupFolderId');
+  let rootFolder = DriveApp.getFolderById(rootFolderId);
+
   function getOrCreateSubFolder(parentFolder, pathString) {
     const parts = pathString.split('/');
     let currentFolder = parentFolder;
@@ -40,86 +37,59 @@ function exportInboxOnly() {
     return currentFolder;
   }
 
-  // 2. PROCESS THREADS
   const threads = GmailApp.search(searchQuery, start, batchSize);
 
   if (!threads || threads.length === 0) {
-    console.log("Inbox export complete.");
     scriptProperties.setProperty('isExportFinished', 'true');
+    console.log("Full migration complete.");
     return; 
   }
 
-  console.log("Processing Inbox threads: " + start + " to " + (start + threads.length));
-
   threads.forEach(thread => {
-    const threadId = thread.getId();
+    const labelNames = thread.getLabels().map(l => l.getName());
     
     thread.getMessages().forEach(msg => {
-      // Logic: Only export messages that are actually in the Inbox
-      // This filters out Sent replies within an Inbox thread if you want it strict
-      if (msg.isInInbox()) {
-        const msgId = msg.getId();
-        const folderPath = "System/Inbox";
-        const targetFolder = getOrCreateSubFolder(rootFolder, folderPath);
-        const fileName = threadId + "_" + msgId + ".eml";
+      const msgId = msg.getId();
+      let folderPath = "";
 
-        try {
-          // Check for existing file to avoid duplicates
-          if (!targetFolder.getFilesByName(fileName).hasNext()) {
-            targetFolder.createFile(fileName, msg.getRawContent(), "message/rfc822");
-          }
-        } catch (e) {
-          console.log("Error saving msg " + msgId + ": " + e.message);
+      // --- ROUTING LOGIC ---
+      if (msg.getFrom().includes(MY_EMAIL)) {
+        folderPath = "System/Sent Mail";
+      } else if (msg.isInInbox()) {
+        folderPath = "System/Inbox";
+      } else if (labelNames.length > 0) {
+        folderPath = labelNames[0]; 
+      } else {
+        folderPath = "System/Archive";
+      }
+
+      const targetFolder = getOrCreateSubFolder(rootFolder, folderPath);
+      const fileName = msgId + ".eml";
+
+      try {
+        if (!targetFolder.getFilesByName(fileName).hasNext()) {
+          targetFolder.createFile(fileName, msg.getRawContent(), "message/rfc822");
         }
+      } catch (e) {
+        console.log("Skipped error on: " + msgId);
       }
     });
   });
 
   lock.releaseLock();
 }
-/**
- * RESET FUNCTION: Wipes the counter, clears the finish flag, 
- * and deletes all files/folders inside the backup directory.
- */
+
 function resetDeepArchive() {
   const scriptProperties = PropertiesService.getScriptProperties();
   const rootFolderId = scriptProperties.getProperty('backupFolderId');
-  
-  // 1. Reset Internal Progress Tracking
   scriptProperties.setProperty('skipCount', '0');
   scriptProperties.setProperty('isExportFinished', 'false');
-
-  // 2. Delete Drive Contents
   if (rootFolderId) {
-    try {
-      const rootFolder = DriveApp.getFolderById(rootFolderId);
-      console.log("Cleaning up Drive folder: " + rootFolder.getName());
-      
-      // Delete all files inside the root
-      const files = rootFolder.getFiles();
-      while (files.hasNext()) {
-        files.next().setTrashed(true);
-      }
-      
-      // Delete all sub-folders (Inbox, Sent, etc.)
-      const subFolders = rootFolder.getFolders();
-      while (subFolders.hasNext()) {
-        subFolders.next().setTrashed(true);
-      }
-      
-      console.log("Drive contents moved to Trash.");
-    } catch (e) {
-      console.log("Could not find or clean the Drive folder: " + e.message);
-    }
+    const rootFolder = DriveApp.getFolderById(rootFolderId);
+    const files = rootFolder.getFiles();
+    while (files.hasNext()) files.next().setTrashed(true);
+    const subFolders = rootFolder.getFolders();
+    while (subFolders.hasNext()) subFolders.next().setTrashed(true);
   }
-
-  // 3. Clear Spreadsheet (if you are still using it for logs)
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  sheet.clear();
-  
-  console.log("Reset Complete. System is now empty and ready for a fresh run.");
-  
-  try {
-    SpreadsheetApp.getUi().alert("Reset Successful: Drive files trashed and counter set to zero.");
-  } catch(e) {}
+  console.log("Reset Complete.");
 }
